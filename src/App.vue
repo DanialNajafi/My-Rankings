@@ -467,18 +467,19 @@ function getRating(id) {
 .card-media-placeholder {
   background: linear-gradient(to bottom, #1f2933, #020617);
   border-radius: 12px;
-  height: 140px;
+  height: 220px;
   display: flex;
   align-items: center;
   justify-content: center;
 }
 
 .card-media-img {
-  width: 100%;
-  height: 140px;
+  max-width: 100%;
+  height: 220px;
   border-radius: 12px;
-  object-fit: cover;
+  object-fit: contain;
   display: block;
+  margin: 0 auto;
 }
 
 .card-media-icon {
