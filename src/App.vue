@@ -1,5 +1,5 @@
 <script setup>
-import { computed, reactive, ref, onMounted } from 'vue'
+import { computed, reactive, ref, onMounted, watch } from 'vue'
 
 const TABS = ['Explore', 'Wishlist', 'Ratings']
 
@@ -8,6 +8,7 @@ const OMDB_API_KEY = import.meta.env.VITE_OMDB_API_KEY
 
 const activeTab = ref('Explore')
 const activeGenre = ref('All')
+const searchQuery = ref('')
 
 const genres = [
   'All',
@@ -20,7 +21,9 @@ const genres = [
   'Supernatural',
 ]
 
-const items = reactive([
+// Base curated titles that are always shown when there is no search
+const baseItems = reactive([
+  // Movies
   {
     id: 1,
     title: 'Inception',
@@ -30,32 +33,143 @@ const items = reactive([
   },
   {
     id: 2,
+    title: 'The Dark Knight',
+    year: 2008,
+    episodes: 1,
+    genres: ['Action', 'Drama'],
+  },
+  {
+    id: 3,
+    title: 'Interstellar',
+    year: 2014,
+    episodes: 1,
+    genres: ['Adventure', 'Sci-Fi'],
+  },
+  {
+    id: 4,
+    title: 'Spirited Away',
+    year: 2001,
+    episodes: 1,
+    genres: ['Fantasy', 'Animation'],
+  },
+  // Live-action series
+  {
+    id: 5,
     title: 'Breaking Bad',
     year: 2008,
     episodes: 62,
     genres: ['Drama', 'Crime'],
   },
   {
-    id: 3,
-    title: 'Spirited Away',
-    year: 2001,
-    episodes: 1,
-    genres: ['Fantasy', 'Animation'],
+    id: 6,
+    title: 'Game of Thrones',
+    year: 2011,
+    episodes: 73,
+    genres: ['Drama', 'Fantasy'],
   },
   {
-    id: 4,
+    id: 7,
+    title: 'Stranger Things',
+    year: 2016,
+    episodes: 34,
+    genres: ['Drama', 'Supernatural'],
+  },
+  {
+    id: 8,
+    title: 'The Witcher',
+    year: 2019,
+    episodes: 24,
+    genres: ['Action', 'Fantasy'],
+  },
+  // Anime series
+  {
+    id: 9,
     title: 'Attack on Titan',
     year: 2013,
     episodes: 87,
     genres: ['Action', 'Dark Fantasy'],
   },
+  {
+    id: 10,
+    title: 'Fullmetal Alchemist: Brotherhood',
+    year: 2009,
+    episodes: 64,
+    genres: ['Action', 'Adventure'],
+  },
+  {
+    id: 11,
+    title: 'Death Note',
+    year: 2006,
+    episodes: 37,
+    genres: ['Drama', 'Supernatural'],
+  },
+  {
+    id: 12,
+    title: 'Jujutsu Kaisen',
+    year: 2020,
+    episodes: 47,
+    genres: ['Action', 'Supernatural'],
+  },
+  {
+    id: 13,
+    title: 'My Hero Academia',
+    year: 2016,
+    episodes: 113,
+    genres: ['Action', 'Superhero'],
+  },
+  {
+    id: 14,
+    title: 'One Piece',
+    year: 1999,
+    episodes: 1000,
+    genres: ['Action', 'Adventure'],
+  },
+  {
+    id: 15,
+    title: 'Naruto',
+    year: 2002,
+    episodes: 220,
+    genres: ['Action', 'Adventure'],
+  },
 ])
+
+// Extra titles loaded dynamically from search (only shown while searching)
+const remoteItems = ref([])
 
 // Store fetched poster URLs keyed by item id
 const posters = reactive({})
 
 const wishlist = reactive(new Set())
 const ratings = reactive({})
+
+async function updateEpisodeCountFromOmdb(item, baseData) {
+  if (!OMDB_API_KEY) return
+  if (!baseData || !baseData.imdbID || !baseData.totalSeasons) return
+
+  try {
+    const totalSeasons = Number.parseInt(baseData.totalSeasons, 10)
+    if (Number.isNaN(totalSeasons) || totalSeasons <= 0) return
+
+    let totalEpisodes = 0
+
+    for (let season = 1; season <= totalSeasons; season += 1) {
+      const seasonUrl = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${baseData.imdbID}&Season=${season}`
+      const seasonRes = await fetch(seasonUrl)
+      const seasonData = await seasonRes.json()
+
+      if (seasonData && Array.isArray(seasonData.Episodes)) {
+        totalEpisodes += seasonData.Episodes.length
+      }
+    }
+
+    if (totalEpisodes > 0) {
+      const current = typeof item.episodes === 'number' ? item.episodes : 0
+      item.episodes = Math.max(current, totalEpisodes)
+    }
+  } catch (e) {
+    console.error('Failed to update episodes for', item.title, e)
+  }
+}
 
 async function fetchPosterForItem(item) {
   if (!OMDB_API_KEY) return
@@ -66,17 +180,94 @@ async function fetchPosterForItem(item) {
     const res = await fetch(url)
     const data = await res.json()
 
-    if (data && data.Response === 'True' && data.Poster && data.Poster !== 'N/A') {
-      posters[item.id] = data.Poster
+    if (data && data.Response === 'True') {
+      if (data.Title) {
+        item.title = data.Title
+      }
+
+      if (data.Poster && data.Poster !== 'N/A') {
+        posters[item.id] = data.Poster
+      }
+
+      if (data.Type === 'series' && data.totalSeasons && data.imdbID) {
+        await updateEpisodeCountFromOmdb(item, data)
+      }
     }
   } catch (e) {
-    console.error('Failed to fetch poster for', item.title, e)
+    console.error('Failed to fetch poster/metadata for', item.title, e)
   }
 }
 
 async function fetchAllPosters() {
-  for (const item of items) {
+  for (const item of baseItems) {
     await fetchPosterForItem(item)
+  }
+}
+
+async function fetchRemoteTitleIfMissing(query) {
+  if (!OMDB_API_KEY) return
+
+  const trimmed = query.trim()
+  if (!trimmed || trimmed.length < 3) return
+  const normalizedQuery = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '')
+
+  try {
+    const url = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&s=${encodeURIComponent(
+      trimmed,
+    )}`
+    const res = await fetch(url)
+    const data = await res.json()
+
+    if (data && data.Response === 'True' && Array.isArray(data.Search)) {
+      // Start fresh remote results for this search
+      remoteItems.value = []
+
+      // Find a base for new numeric ids
+      const existingIds = [...baseItems, ...remoteItems.value].map(
+        (i) => Number(i.id) || 0,
+      )
+      let nextId =
+        existingIds.length > 0
+          ? Math.max(...existingIds.filter((n) => !Number.isNaN(n))) + 1
+          : 1
+
+      for (const result of data.Search) {
+        const title = result.Title
+        if (!title) continue
+
+        const normalizedTitle = title
+          .toLowerCase()
+          .replace(/[^a-z0-9]/g, '')
+
+        // Only accept titles that are very close to the query:
+        // - normalized query is contained in the normalized title, or
+        // - the title starts with the query (for short queries like "naruto")
+        const isCloseMatch =
+          normalizedTitle.includes(normalizedQuery) ||
+          normalizedTitle.startsWith(normalizedQuery)
+        if (!isCloseMatch) continue
+
+        const alreadyExists = baseItems.some(
+          (item) => item.title.toLowerCase() === title.toLowerCase(),
+        )
+        if (alreadyExists) continue
+
+        const year = result.Year
+        const newItem = {
+          id: nextId,
+          title,
+          year: year ? Number.parseInt(year, 10) || null : null,
+          episodes: 1,
+          genres: [],
+        }
+
+        nextId += 1
+        remoteItems.value.push(newItem)
+        await fetchPosterForItem(newItem)
+      }
+    }
+  } catch (e) {
+    console.error('Failed to fetch remote titles for search', query, e)
   }
 }
 
@@ -88,17 +279,43 @@ onMounted(() => {
   fetchAllPosters()
 })
 
+watch(
+  () => searchQuery.value,
+  (value) => {
+    if (!value) {
+      // Reset Explore view when search is cleared
+      activeGenre.value = 'All'
+      remoteItems.value = []
+      return
+    }
+    fetchRemoteTitleIfMissing(value)
+  },
+)
+
 const filteredItems = computed(() => {
-  if (activeGenre.value === 'All') return items
-  return items.filter((item) => item.genres.includes(activeGenre.value))
+  const genre = activeGenre.value
+  const query = searchQuery.value.trim().toLowerCase()
+
+  let result =
+    genre === 'All'
+      ? allItems.value
+      : allItems.value.filter((item) => item.genres.includes(genre))
+
+  if (!query) return result
+
+  return result.filter((item) =>
+    item.title.toLowerCase().includes(query),
+  )
 })
 
+const allItems = computed(() => [...baseItems, ...remoteItems.value])
+
 const wishlistItems = computed(() =>
-  items.filter((item) => wishlist.has(item.id)),
+  allItems.value.filter((item) => wishlist.has(item.id)),
 )
 
 const ratedItems = computed(() =>
-  items.filter((item) => ratings[item.id] != null),
+  allItems.value.filter((item) => ratings[item.id] != null),
 )
 
 function setTab(tab) {
@@ -160,17 +377,25 @@ function getRating(id) {
       <section v-if="activeTab === 'Explore'" class="panel">
         <div class="panel-header">
           <h2 class="panel-title">Discover Titles</h2>
-          <div class="chip-row">
-            <button
-              v-for="genre in genres"
-              :key="genre"
-              type="button"
-              class="chip"
-              :class="{ 'chip--active': activeGenre === genre }"
-              @click="setGenre(genre)"
-            >
-              {{ genre }}
-            </button>
+          <div class="panel-header-controls">
+            <div class="chip-row">
+              <button
+                v-for="genre in genres"
+                :key="genre"
+                type="button"
+                class="chip"
+                :class="{ 'chip--active': activeGenre === genre }"
+                @click="setGenre(genre)"
+              >
+                {{ genre }}
+              </button>
+            </div>
+            <input
+              v-model="searchQuery"
+              type="search"
+              class="search-input"
+              placeholder="Search titles..."
+            />
           </div>
         </div>
 
@@ -415,8 +640,16 @@ function getRating(id) {
 .panel-header {
   display: flex;
   flex-direction: column;
-  gap: 16px;
+  gap: 12px;
   margin-bottom: 24px;
+}
+
+.panel-header-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+  justify-content: space-between;
 }
 
 .panel-title {
@@ -437,6 +670,21 @@ function getRating(id) {
   background: #020617;
   color: #e5e7eb;
   font-size: 12px;
+}
+
+.search-input {
+  flex: 0 0 220px;
+  max-width: 100%;
+  border-radius: 999px;
+  padding: 8px 14px;
+  border: 1px solid #1f2937;
+  background: #020617;
+  color: #e5e7eb;
+  font-size: 13px;
+}
+
+.search-input::placeholder {
+  color: #6b7280;
 }
 
 .chip--active {
