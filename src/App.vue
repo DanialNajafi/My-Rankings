@@ -6,6 +6,50 @@ const TABS = ['Explore', 'Wishlist', 'Ratings']
 // OMDb API key from Vite env (see .env)
 const OMDB_API_KEY = import.meta.env.VITE_OMDB_API_KEY
 
+// Manual fixes for series where OMDb episode counts are incomplete or wrong
+const EPISODE_OVERRIDES = {
+  'One Piece': 1000,
+  'Hell Mode': 12,
+}
+
+// AniList GraphQL endpoint (used as a better source for anime episode counts)
+const ANILIST_ENDPOINT = 'https://graphql.anilist.co'
+
+async function fetchEpisodesFromAniList(title) {
+  try {
+    const query = `
+      query ($search: String) {
+        Media(search: $search, type: ANIME) {
+          episodes
+        }
+      }
+    `
+
+    const res = await fetch(ANILIST_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        variables: { search: title },
+      }),
+    })
+
+    const json = await res.json()
+    const episodes = json?.data?.Media?.episodes
+
+    if (typeof episodes === 'number' && episodes > 0) {
+      return episodes
+    }
+    return null
+  } catch (e) {
+    console.error('Failed to fetch episodes from AniList for', title, e)
+    return null
+  }
+}
+
 const activeTab = ref('Explore')
 const activeGenre = ref('All')
 const searchQuery = ref('')
@@ -143,31 +187,51 @@ const wishlist = reactive(new Set())
 const ratings = reactive({})
 
 async function updateEpisodeCountFromOmdb(item, baseData) {
-  if (!OMDB_API_KEY) return
-  if (!baseData || !baseData.imdbID || !baseData.totalSeasons) return
+  if (!baseData) return
 
-  try {
-    const totalSeasons = Number.parseInt(baseData.totalSeasons, 10)
-    if (Number.isNaN(totalSeasons) || totalSeasons <= 0) return
+  // 1) Manual override wins always
+  const manual = EPISODE_OVERRIDES[baseData.Title] ?? EPISODE_OVERRIDES[item.title]
+  if (typeof manual === 'number' && manual > 0) {
+    item.episodes = manual
+    return
+  }
 
-    let totalEpisodes = 0
+  let best = typeof item.episodes === 'number' ? item.episodes : 0
 
-    for (let season = 1; season <= totalSeasons; season += 1) {
-      const seasonUrl = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${baseData.imdbID}&Season=${season}`
-      const seasonRes = await fetch(seasonUrl)
-      const seasonData = await seasonRes.json()
+  // 2) Try to count episodes via OMDb seasons, if we have that data
+  if (OMDB_API_KEY && baseData.imdbID && baseData.totalSeasons) {
+    try {
+      const totalSeasons = Number.parseInt(baseData.totalSeasons, 10)
+      if (!Number.isNaN(totalSeasons) && totalSeasons > 0) {
+        let totalEpisodes = 0
 
-      if (seasonData && Array.isArray(seasonData.Episodes)) {
-        totalEpisodes += seasonData.Episodes.length
+        for (let season = 1; season <= totalSeasons; season += 1) {
+          const seasonUrl = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${baseData.imdbID}&Season=${season}`
+          const seasonRes = await fetch(seasonUrl)
+          const seasonData = await seasonRes.json()
+
+          if (seasonData && Array.isArray(seasonData.Episodes)) {
+            totalEpisodes += seasonData.Episodes.length
+          }
+        }
+
+        if (totalEpisodes > 0) {
+          best = Math.max(best, totalEpisodes)
+        }
       }
+    } catch (e) {
+      console.error('Failed to update episodes from OMDb for', item.title, e)
     }
+  }
 
-    if (totalEpisodes > 0) {
-      const current = typeof item.episodes === 'number' ? item.episodes : 0
-      item.episodes = Math.max(current, totalEpisodes)
-    }
-  } catch (e) {
-    console.error('Failed to update episodes for', item.title, e)
+  // 3) Fallback / enhancement: ask AniList for anime episode counts
+  const aniListEpisodes = await fetchEpisodesFromAniList(item.title)
+  if (typeof aniListEpisodes === 'number' && aniListEpisodes > 0) {
+    best = Math.max(best, aniListEpisodes)
+  }
+
+  if (best > 0) {
+    item.episodes = best
   }
 }
 
@@ -240,11 +304,11 @@ async function fetchRemoteTitleIfMissing(query) {
           .replace(/[^a-z0-9]/g, '')
 
         // Only accept titles that are very close to the query:
-        // - normalized query is contained in the normalized title, or
-        // - the title starts with the query (for short queries like "naruto")
+        // Require the normalized title to start with the normalized query
+        // or vice versa (so "naruto" also matches "naruto shippuden")
         const isCloseMatch =
-          normalizedTitle.includes(normalizedQuery) ||
-          normalizedTitle.startsWith(normalizedQuery)
+          normalizedTitle.startsWith(normalizedQuery) ||
+          normalizedQuery.startsWith(normalizedTitle)
         if (!isCloseMatch) continue
 
         const alreadyExists = baseItems.some(
@@ -296,12 +360,18 @@ const filteredItems = computed(() => {
   const genre = activeGenre.value
   const query = searchQuery.value.trim().toLowerCase()
 
-  let result =
+  // When there is no search query, show only the curated base items
+  if (!query) {
+    return genre === 'All'
+      ? baseItems
+      : baseItems.filter((item) => item.genres.includes(genre))
+  }
+
+  // When searching, include both base and remote items
+  const result =
     genre === 'All'
       ? allItems.value
       : allItems.value.filter((item) => item.genres.includes(genre))
-
-  if (!query) return result
 
   return result.filter((item) =>
     item.title.toLowerCase().includes(query),
