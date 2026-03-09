@@ -1,7 +1,10 @@
 <script setup>
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, onMounted } from 'vue'
 
 const TABS = ['Explore', 'Wishlist', 'Ratings']
+
+// OMDb API key from Vite env (see .env)
+const OMDB_API_KEY = import.meta.env.VITE_OMDB_API_KEY
 
 const activeTab = ref('Explore')
 const activeGenre = ref('All')
@@ -20,36 +23,70 @@ const genres = [
 const items = reactive([
   {
     id: 1,
+    title: 'Inception',
+    year: 2010,
+    episodes: 1,
+    genres: ['Action', 'Sci-Fi'],
+  },
+  {
+    id: 2,
+    title: 'Breaking Bad',
+    year: 2008,
+    episodes: 62,
+    genres: ['Drama', 'Crime'],
+  },
+  {
+    id: 3,
+    title: 'Spirited Away',
+    year: 2001,
+    episodes: 1,
+    genres: ['Fantasy', 'Animation'],
+  },
+  {
+    id: 4,
     title: 'Attack on Titan',
     year: 2013,
     episodes: 87,
     genres: ['Action', 'Dark Fantasy'],
   },
-  {
-    id: 2,
-    title: 'My Hero Academia',
-    year: 2016,
-    episodes: 113,
-    genres: ['Action', 'Superhero'],
-  },
-  {
-    id: 3,
-    title: 'Demon Slayer',
-    year: 2019,
-    episodes: 44,
-    genres: ['Action', 'Supernatural'],
-  },
-  {
-    id: 4,
-    title: 'Jujutsu Kaisen',
-    year: 2020,
-    episodes: 47,
-    genres: ['Action', 'Supernatural'],
-  },
 ])
+
+// Store fetched poster URLs keyed by item id
+const posters = reactive({})
 
 const wishlist = reactive(new Set())
 const ratings = reactive({})
+
+async function fetchPosterForItem(item) {
+  if (!OMDB_API_KEY) return
+
+  try {
+    const query = encodeURIComponent(item.title)
+    const url = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&t=${query}`
+    const res = await fetch(url)
+    const data = await res.json()
+
+    if (data && data.Response === 'True' && data.Poster && data.Poster !== 'N/A') {
+      posters[item.id] = data.Poster
+    }
+  } catch (e) {
+    console.error('Failed to fetch poster for', item.title, e)
+  }
+}
+
+async function fetchAllPosters() {
+  for (const item of items) {
+    await fetchPosterForItem(item)
+  }
+}
+
+function getPosterUrl(item) {
+  return posters[item.id] ?? null
+}
+
+onMounted(() => {
+  fetchAllPosters()
+})
 
 const filteredItems = computed(() => {
   if (activeGenre.value === 'All') return items
@@ -102,7 +139,7 @@ function getRating(id) {
     <header class="header">
       <div class="header-title">MyRankings</div>
       <p class="header-subtitle">
-        Discover, wishlist, and rate your favorite anime and movies
+        Discover, wishlist, and rate your favorite movies, series, and anime
       </p>
 
       <div class="tab-row">
@@ -122,7 +159,7 @@ function getRating(id) {
     <main class="content">
       <section v-if="activeTab === 'Explore'" class="panel">
         <div class="panel-header">
-          <h2 class="panel-title">Discover Anime</h2>
+          <h2 class="panel-title">Discover Titles</h2>
           <div class="chip-row">
             <button
               v-for="genre in genres"
@@ -144,7 +181,13 @@ function getRating(id) {
             class="card"
           >
             <div class="card-media">
-              <div class="card-media-placeholder">
+              <img
+                v-if="getPosterUrl(item)"
+                class="card-media-img"
+                :src="getPosterUrl(item)"
+                :alt="item.title"
+              />
+              <div v-else class="card-media-placeholder">
                 <span class="card-media-icon">🖼️</span>
               </div>
               <div class="card-media-actions">
@@ -218,7 +261,13 @@ function getRating(id) {
             class="card"
           >
             <div class="card-media">
-              <div class="card-media-placeholder">
+              <img
+                v-if="getPosterUrl(item)"
+                class="card-media-img"
+                :src="getPosterUrl(item)"
+                :alt="item.title"
+              />
+              <div v-else class="card-media-placeholder">
                 <span class="card-media-icon">🖼️</span>
               </div>
               <div class="card-media-actions">
@@ -263,7 +312,13 @@ function getRating(id) {
             class="card"
           >
             <div class="card-media">
-              <div class="card-media-placeholder">
+              <img
+                v-if="getPosterUrl(item)"
+                class="card-media-img"
+                :src="getPosterUrl(item)"
+                :alt="item.title"
+              />
+              <div v-else class="card-media-placeholder">
                 <span class="card-media-icon">🖼️</span>
               </div>
             </div>
@@ -416,6 +471,14 @@ function getRating(id) {
   display: flex;
   align-items: center;
   justify-content: center;
+}
+
+.card-media-img {
+  width: 100%;
+  height: 140px;
+  border-radius: 12px;
+  object-fit: cover;
+  display: block;
 }
 
 .card-media-icon {
