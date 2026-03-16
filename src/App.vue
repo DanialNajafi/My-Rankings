@@ -8,19 +8,35 @@ const OMDB_API_KEY = import.meta.env.VITE_OMDB_API_KEY
 
 // Manual fixes for series where OMDb episode counts are incomplete or wrong
 const EPISODE_OVERRIDES = {
-  'One Piece': 1000,
   'Hell Mode': 12,
 }
 
 // AniList GraphQL endpoint (used as a better source for anime episode counts)
 const ANILIST_ENDPOINT = 'https://graphql.anilist.co'
+const TVMAZE_BASE = 'https://api.tvmaze.com'
 
-async function fetchEpisodesFromAniList(title) {
+async function fetchAnimeMetaFromAniList(title) {
   try {
     const query = `
       query ($search: String) {
         Media(search: $search, type: ANIME) {
+          id
+          title {
+            romaji
+            english
+            native
+          }
           episodes
+          nextAiringEpisode {
+            episode
+          }
+          genres
+          startDate {
+            year
+          }
+          coverImage {
+            large
+          }
         }
       }
     `
@@ -38,15 +54,250 @@ async function fetchEpisodesFromAniList(title) {
     })
 
     const json = await res.json()
-    const episodes = json?.data?.Media?.episodes
+    const media = json?.data?.Media
+    if (!media) return null
 
-    if (typeof episodes === 'number' && episodes > 0) {
-      return episodes
+    const displayTitle =
+      media.title?.english || media.title?.romaji || media.title?.native || null
+
+    const computedEpisodes =
+      typeof media.episodes === 'number' && media.episodes > 0
+        ? media.episodes
+        : typeof media.nextAiringEpisode?.episode === 'number' &&
+            media.nextAiringEpisode.episode > 1
+          ? media.nextAiringEpisode.episode - 1
+          : null
+
+    return {
+      anilistId: media.id ?? null,
+      title: displayTitle,
+      year: media.startDate?.year ?? null,
+      episodes: computedEpisodes,
+      genres: Array.isArray(media.genres) ? media.genres : [],
+      coverUrl: media.coverImage?.large ?? null,
+    }
+  } catch (e) {
+    console.error('Failed to fetch anime meta from AniList for', title, e)
+    return null
+  }
+}
+
+async function fetchSeriesEpisodeCountFromTvmaze(item) {
+  try {
+    if (!item) return null
+
+    let tvmazeId = item.tvmazeId ?? null
+
+    if (!tvmazeId) {
+      if (!item.imdbID) return null
+      const lookupRes = await fetch(
+        `${TVMAZE_BASE}/lookup/shows?imdb=${encodeURIComponent(item.imdbID)}`,
+      )
+      if (!lookupRes.ok) return null
+      const show = await lookupRes.json()
+      tvmazeId = show?.id ?? null
+      if (tvmazeId) item.tvmazeId = tvmazeId
+    }
+
+    if (!tvmazeId) return null
+    const epsRes = await fetch(`${TVMAZE_BASE}/shows/${tvmazeId}/episodes`)
+    if (!epsRes.ok) return null
+    const eps = await epsRes.json()
+
+    if (Array.isArray(eps) && eps.length > 0) {
+      return eps.length
     }
     return null
   } catch (e) {
-    console.error('Failed to fetch episodes from AniList for', title, e)
+    console.error('Failed to fetch TVMaze episodes for', item?.title, e)
     return null
+  }
+}
+
+async function loadTrendingAnimeFromAniList(limit = 12) {
+  try {
+    const query = `
+      query ($perPage: Int) {
+        Page(page: 1, perPage: $perPage) {
+          media(sort: TRENDING_DESC, type: ANIME) {
+            id
+            title { romaji english native }
+            episodes
+            nextAiringEpisode { episode }
+            genres
+            startDate { year }
+            coverImage { large }
+          }
+        }
+      }
+    `
+
+    const res = await fetch(ANILIST_ENDPOINT, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+      },
+      body: JSON.stringify({
+        query,
+        variables: { perPage: limit },
+      }),
+    })
+
+    const json = await res.json()
+    const mediaList = json?.data?.Page?.media
+    if (!Array.isArray(mediaList)) return []
+
+    return mediaList.map((media) => {
+      const title =
+        media?.title?.english || media?.title?.romaji || media?.title?.native
+      if (!title) return null
+
+      const episodes =
+        typeof media?.episodes === 'number' && media.episodes > 0
+          ? media.episodes
+          : typeof media?.nextAiringEpisode?.episode === 'number' &&
+              media.nextAiringEpisode.episode > 1
+            ? media.nextAiringEpisode.episode - 1
+            : null
+
+      return {
+        title,
+        year: media?.startDate?.year ?? null,
+        episodes,
+        genres: Array.isArray(media?.genres) ? media.genres : [],
+        kind: 'anime',
+        source: 'anilist',
+        anilistId: media?.id ?? null,
+        posterUrl: media?.coverImage?.large ?? null,
+      }
+    }).filter(Boolean)
+  } catch (e) {
+    console.error('Failed to load trending anime from AniList', e)
+    return []
+  }
+}
+
+async function loadTrendingSeriesFromTvmaze(limit = 12) {
+  try {
+    const res = await fetch(`${TVMAZE_BASE}/shows?page=0`)
+    if (!res.ok) return []
+    const shows = await res.json()
+    if (!Array.isArray(shows)) return []
+
+    const sorted = shows
+      .slice()
+      .sort((a, b) => (b?.weight || 0) - (a?.weight || 0))
+      .slice(0, limit)
+
+    return sorted.map((show) => {
+      const title = show?.name
+      if (!title) return null
+
+      const premiered = show?.premiered
+      const year = premiered ? Number.parseInt(premiered.slice(0, 4), 10) || null : null
+
+      const genres = Array.isArray(show?.genres) ? show.genres : []
+
+      const posterUrl = show?.image?.original || show?.image?.medium || null
+
+      return {
+        title,
+        year,
+        episodes: null,
+        genres,
+        kind: 'series',
+        source: 'tvmaze',
+        tvmazeId: show?.id ?? null,
+        imdbID: show?.externals?.imdb ?? null,
+        posterUrl,
+      }
+    }).filter(Boolean)
+  } catch (e) {
+    console.error('Failed to load trending series from TVMaze', e)
+    return []
+  }
+}
+
+async function loadTopMoviesFromApple(limit = 12, country = 'us') {
+  try {
+    const res = await fetch(
+      `https://rss.itunes.apple.com/api/v1/${country}/movies/top-movies/${limit}/explicit.json`,
+    )
+    if (!res.ok) return []
+    const json = await res.json()
+    const results = json?.feed?.results
+    if (!Array.isArray(results)) return []
+
+    return results.map((entry) => {
+      const title = entry?.name
+      if (!title) return null
+
+      const releaseDate = entry?.releaseDate
+      const year = releaseDate
+        ? Number.parseInt(releaseDate.slice(0, 4), 10) || null
+        : null
+
+      const genres = Array.isArray(entry?.genres)
+        ? entry.genres.map((g) => g.name).filter(Boolean)
+        : []
+
+      let posterUrl = entry?.artworkUrl100 ?? null
+      if (posterUrl) {
+        // Use a higher resolution if available via URL pattern
+        posterUrl = posterUrl.replace('100x100bb', '500x500bb')
+      }
+
+      return {
+        title,
+        year,
+        episodes: 1,
+        genres,
+        kind: 'movie',
+        source: 'apple',
+        posterUrl,
+      }
+    }).filter(Boolean)
+  } catch (e) {
+    console.error('Failed to load top movies from Apple RSS', e)
+    return []
+  }
+}
+
+async function loadTrendingBaseItems() {
+  try {
+    const [anime, series, movies] = await Promise.all([
+      loadTrendingAnimeFromAniList(12),
+      loadTrendingSeriesFromTvmaze(12),
+      loadTopMoviesFromApple(12, 'us'),
+    ])
+
+    const merged = [...anime, ...series, ...movies]
+    const seen = new Set()
+
+    // Clear any previous runtime base items (but keep array reactive)
+    baseItems.splice(0, baseItems.length)
+
+    for (const item of merged) {
+      const norm = (item.title || '')
+        .toLowerCase()
+        .replace(/[^a-z0-9]/g, '')
+      if (!norm || seen.has(norm)) continue
+      seen.add(norm)
+
+      const id = getNextId()
+      const withId = { ...item, id }
+      baseItems.push(withId)
+
+      if (item.posterUrl) {
+        posters[id] = item.posterUrl
+      } else {
+        // As a fallback, let fetchPosterForItem try to enrich later
+        fetchPosterForItem(withId)
+      }
+    }
+  } catch (e) {
+    console.error('Failed to load trending base items', e)
   }
 }
 
@@ -65,117 +316,8 @@ const genres = [
   'Supernatural',
 ]
 
-// Base curated titles that are always shown when there is no search
-const baseItems = reactive([
-  // Movies
-  {
-    id: 1,
-    title: 'Inception',
-    year: 2010,
-    episodes: 1,
-    genres: ['Action', 'Sci-Fi'],
-  },
-  {
-    id: 2,
-    title: 'The Dark Knight',
-    year: 2008,
-    episodes: 1,
-    genres: ['Action', 'Drama'],
-  },
-  {
-    id: 3,
-    title: 'Interstellar',
-    year: 2014,
-    episodes: 1,
-    genres: ['Adventure', 'Sci-Fi'],
-  },
-  {
-    id: 4,
-    title: 'Spirited Away',
-    year: 2001,
-    episodes: 1,
-    genres: ['Fantasy', 'Animation'],
-  },
-  // Live-action series
-  {
-    id: 5,
-    title: 'Breaking Bad',
-    year: 2008,
-    episodes: 62,
-    genres: ['Drama', 'Crime'],
-  },
-  {
-    id: 6,
-    title: 'Game of Thrones',
-    year: 2011,
-    episodes: 73,
-    genres: ['Drama', 'Fantasy'],
-  },
-  {
-    id: 7,
-    title: 'Stranger Things',
-    year: 2016,
-    episodes: 34,
-    genres: ['Drama', 'Supernatural'],
-  },
-  {
-    id: 8,
-    title: 'The Witcher',
-    year: 2019,
-    episodes: 24,
-    genres: ['Action', 'Fantasy'],
-  },
-  // Anime series
-  {
-    id: 9,
-    title: 'Attack on Titan',
-    year: 2013,
-    episodes: 87,
-    genres: ['Action', 'Dark Fantasy'],
-  },
-  {
-    id: 10,
-    title: 'Fullmetal Alchemist: Brotherhood',
-    year: 2009,
-    episodes: 64,
-    genres: ['Action', 'Adventure'],
-  },
-  {
-    id: 11,
-    title: 'Death Note',
-    year: 2006,
-    episodes: 37,
-    genres: ['Drama', 'Supernatural'],
-  },
-  {
-    id: 12,
-    title: 'Jujutsu Kaisen',
-    year: 2020,
-    episodes: 47,
-    genres: ['Action', 'Supernatural'],
-  },
-  {
-    id: 13,
-    title: 'My Hero Academia',
-    year: 2016,
-    episodes: 113,
-    genres: ['Action', 'Superhero'],
-  },
-  {
-    id: 14,
-    title: 'One Piece',
-    year: 1999,
-    episodes: 1000,
-    genres: ['Action', 'Adventure'],
-  },
-  {
-    id: 15,
-    title: 'Naruto',
-    year: 2002,
-    episodes: 220,
-    genres: ['Action', 'Adventure'],
-  },
-])
+// Base curated titles for Explore (filled at runtime from trending APIs)
+const baseItems = reactive([])
 
 // Extra titles loaded dynamically from search (only shown while searching)
 const remoteItems = ref([])
@@ -193,6 +335,14 @@ const LS_KEYS = {
   wishlist: 'myrankings:wishlist',
   ratings: 'myrankings:ratings',
   savedItems: 'myrankings:savedItems',
+}
+
+function getNextId() {
+  const all = [...baseItems, ...savedItems.value]
+  const ids = all
+    .map((i) => Number(i.id) || 0)
+    .filter((n) => !Number.isNaN(n) && n > 0)
+  return ids.length > 0 ? Math.max(...ids) + 1 : 1
 }
 
 async function updateEpisodeCountFromOmdb(item, baseData) {
@@ -233,23 +383,35 @@ async function updateEpisodeCountFromOmdb(item, baseData) {
     }
   }
 
-  // 3) Fallback / enhancement: ask AniList for anime episode counts
-  const aniListEpisodes = await fetchEpisodesFromAniList(item.title)
-  if (typeof aniListEpisodes === 'number' && aniListEpisodes > 0) {
-    best = Math.max(best, aniListEpisodes)
-  }
-
   if (best > 0) {
     item.episodes = best
   }
 }
 
 async function fetchPosterForItem(item) {
+  // If the item is anime, always use AniList for metadata + cover
+  if (item?.source === 'anilist') {
+    const meta = await fetchAnimeMetaFromAniList(item.title)
+    if (!meta) return
+
+    if (meta.title) item.title = meta.title
+    if (typeof meta.year === 'number') item.year = meta.year
+    if (typeof meta.episodes === 'number') item.episodes = meta.episodes
+    if (Array.isArray(meta.genres) && meta.genres.length > 0) item.genres = meta.genres
+    if (meta.coverUrl) posters[item.id] = meta.coverUrl
+    if (meta.anilistId) item.anilistId = meta.anilistId
+    return
+  }
+
+  // Otherwise (series/movies), use OMDb
   if (!OMDB_API_KEY) return
 
   try {
-    const query = encodeURIComponent(item.title)
-    const url = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&t=${query}`
+    const url =
+      item?.imdbID
+        ? `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&i=${encodeURIComponent(item.imdbID)}`
+        : `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&t=${encodeURIComponent(item.title)}`
+
     const res = await fetch(url)
     const data = await res.json()
 
@@ -262,86 +424,151 @@ async function fetchPosterForItem(item) {
         posters[item.id] = data.Poster
       }
 
+      if (data.imdbID) item.imdbID = data.imdbID
+      if (data.Type) item.omdbType = data.Type
+      if (data.Type) item.kind = data.Type
+
       if (data.Type === 'series' && data.totalSeasons && data.imdbID) {
-        await updateEpisodeCountFromOmdb(item, data)
+        const tvmazeCount = await fetchSeriesEpisodeCountFromTvmaze(item)
+        if (typeof tvmazeCount === 'number' && tvmazeCount > 0) {
+          item.episodes = tvmazeCount
+        } else {
+          await updateEpisodeCountFromOmdb(item, data)
+        }
       }
     }
   } catch (e) {
-    console.error('Failed to fetch poster/metadata for', item.title, e)
+    console.error('Failed to fetch OMDb metadata for', item.title, e)
   }
 }
 
 async function fetchAllPosters() {
-  for (const item of baseItems) {
-    await fetchPosterForItem(item)
-  }
+  // Kept for backward compatibility; now handled by trending loaders.
+  return
 }
 
 async function fetchRemoteTitleIfMissing(query) {
-  if (!OMDB_API_KEY) return
-
   const trimmed = query.trim()
   if (!trimmed || trimmed.length < 3) return
   const normalizedQuery = trimmed.toLowerCase().replace(/[^a-z0-9]/g, '')
 
   try {
-    const url = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&s=${encodeURIComponent(
-      trimmed,
-    )}`
-    const res = await fetch(url)
-    const data = await res.json()
+    // Start fresh remote results for this search
+    remoteItems.value = []
 
-    if (data && data.Response === 'True' && Array.isArray(data.Search)) {
-      // Start fresh remote results for this search
-      remoteItems.value = []
+    // Find a base for new numeric ids
+    const existingIds = [...baseItems, ...savedItems.value].map((i) => Number(i.id) || 0)
+    let nextId =
+      existingIds.length > 0
+        ? Math.max(...existingIds.filter((n) => !Number.isNaN(n))) + 1
+        : 1
 
-      // Find a base for new numeric ids
-      const existingIds = [...baseItems, ...remoteItems.value].map(
-        (i) => Number(i.id) || 0,
+    const normalizedStartsWith = (title) => {
+      const normalizedTitle = title.toLowerCase().replace(/[^a-z0-9]/g, '')
+      return (
+        normalizedTitle.startsWith(normalizedQuery) ||
+        normalizedQuery.startsWith(normalizedTitle)
       )
-      let nextId =
-        existingIds.length > 0
-          ? Math.max(...existingIds.filter((n) => !Number.isNaN(n))) + 1
-          : 1
+    }
 
-      for (const result of data.Search) {
-        const title = result.Title
-        if (!title) continue
-
-        const normalizedTitle = title
-          .toLowerCase()
-          .replace(/[^a-z0-9]/g, '')
-
-        // Only accept titles that are very close to the query:
-        // Require the normalized title to start with the normalized query
-        // or vice versa (so "naruto" also matches "naruto shippuden")
-        const isCloseMatch =
-          normalizedTitle.startsWith(normalizedQuery) ||
-          normalizedQuery.startsWith(normalizedTitle)
-        if (!isCloseMatch) continue
-
-        const alreadyExists = baseItems.some(
-          (item) => item.title.toLowerCase() === title.toLowerCase(),
-        )
-        if (alreadyExists) continue
-
-        const alreadySaved = savedItems.value.some(
-          (item) => item.title.toLowerCase() === title.toLowerCase(),
-        )
-        if (alreadySaved) continue
-
-        const year = result.Year
-        const newItem = {
-          id: nextId,
-          title,
-          year: year ? Number.parseInt(year, 10) || null : null,
-          episodes: 1,
-          genres: [],
+    // 1) Anime: always search via AniList
+    try {
+      const aniQuery = `
+        query ($search: String, $perPage: Int) {
+          Page(page: 1, perPage: $perPage) {
+            media(search: $search, type: ANIME, sort: SEARCH_MATCH) {
+              id
+              title { romaji english native }
+              episodes
+              nextAiringEpisode { episode }
+              genres
+              startDate { year }
+              coverImage { large }
+            }
+          }
         }
+      `
+      const aniRes = await fetch(ANILIST_ENDPOINT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Accept: 'application/json' },
+        body: JSON.stringify({ query: aniQuery, variables: { search: trimmed, perPage: 8 } }),
+      })
+      const aniJson = await aniRes.json()
+      const mediaList = aniJson?.data?.Page?.media
+      if (Array.isArray(mediaList)) {
+        for (const media of mediaList) {
+          const title =
+            media?.title?.english || media?.title?.romaji || media?.title?.native
+          if (!title) continue
+          if (!normalizedStartsWith(title)) continue
 
-        nextId += 1
-        remoteItems.value.push(newItem)
-        await fetchPosterForItem(newItem)
+          const alreadyExists =
+            baseItems.some((i) => i.title.toLowerCase() === title.toLowerCase()) ||
+            savedItems.value.some((i) => i.title.toLowerCase() === title.toLowerCase())
+          if (alreadyExists) continue
+
+          const newItem = {
+            id: nextId,
+            title,
+            year: media?.startDate?.year ?? null,
+            episodes:
+              typeof media?.episodes === 'number' && media.episodes > 0
+                ? media.episodes
+                : typeof media?.nextAiringEpisode?.episode === 'number' &&
+                    media.nextAiringEpisode.episode > 1
+                  ? media.nextAiringEpisode.episode - 1
+                  : 1,
+            genres: Array.isArray(media?.genres) ? media.genres : [],
+            source: 'anilist',
+            kind: 'anime',
+            anilistId: media?.id ?? null,
+          }
+          nextId += 1
+          remoteItems.value.push(newItem)
+          if (media?.coverImage?.large) posters[newItem.id] = media.coverImage.large
+        }
+      }
+    } catch (e) {
+      console.error('AniList search failed for', trimmed, e)
+    }
+
+    // 2) Series/Movies: search via OMDb (no anime here)
+    if (OMDB_API_KEY) {
+      const url = `https://www.omdbapi.com/?apikey=${OMDB_API_KEY}&s=${encodeURIComponent(
+        trimmed,
+      )}`
+      const res = await fetch(url)
+      const data = await res.json()
+
+      if (data && data.Response === 'True' && Array.isArray(data.Search)) {
+        for (const result of data.Search) {
+          if (result?.Type !== 'series' && result?.Type !== 'movie') continue
+
+          const title = result.Title
+          if (!title) continue
+          if (!normalizedStartsWith(title)) continue
+
+          const alreadyExists =
+            baseItems.some((i) => i.title.toLowerCase() === title.toLowerCase()) ||
+            savedItems.value.some((i) => i.title.toLowerCase() === title.toLowerCase())
+          if (alreadyExists) continue
+
+          const newItem = {
+            id: nextId,
+            title,
+            year: result.Year ? Number.parseInt(result.Year, 10) || null : null,
+            episodes: 1,
+            genres: [],
+            source: 'omdb',
+            kind: result.Type ?? null,
+            imdbID: result.imdbID ?? null,
+            omdbType: result.Type ?? null,
+          }
+
+          nextId += 1
+          remoteItems.value.push(newItem)
+          await fetchPosterForItem(newItem)
+        }
       }
     }
   } catch (e) {
@@ -354,8 +581,6 @@ function getPosterUrl(item) {
 }
 
 onMounted(() => {
-  fetchAllPosters()
-
   // Restore persisted state
   try {
     const rawWishlist = localStorage.getItem(LS_KEYS.wishlist)
@@ -378,7 +603,14 @@ onMounted(() => {
 
     const parsedSaved = rawSavedItems ? JSON.parse(rawSavedItems) : []
     if (Array.isArray(parsedSaved)) {
-      savedItems.value = parsedSaved
+      savedItems.value = parsedSaved.map((item) => ({
+        ...item,
+        source: item?.source ?? 'omdb',
+        kind:
+          item?.kind ??
+          item?.omdbType ??
+          (item?.source === 'anilist' ? 'anime' : null),
+      }))
       for (const item of savedItems.value) {
         fetchPosterForItem(item)
       }
@@ -386,10 +618,13 @@ onMounted(() => {
   } catch (e) {
     console.error('Failed to restore from localStorage', e)
   }
+
+  // Load mixed trending list for Explore
+  loadTrendingBaseItems()
 })
 
 watch(
-  () => searchQuery.value,
+  () => searchQuery.value.trim(),
   (value) => {
     if (!value) {
       // Reset Explore view when search is cleared
@@ -517,6 +752,17 @@ function isWishlisted(id) {
 function getRating(id) {
   return ratings[id] ?? null
 }
+
+function getMetaLine(item) {
+  const year = item?.year ?? '?'
+  const kind = item?.kind ?? item?.omdbType ?? 'series'
+
+  if (kind === 'movie') return `${year} • Movie`
+
+  const count =
+    typeof item?.episodes === 'number' && item.episodes > 0 ? item.episodes : '?'
+  return `${year} • ${count} episodes`
+}
 </script>
 
 <template>
@@ -536,7 +782,14 @@ function getRating(id) {
           :class="{ 'tab-button--active': activeTab === tab }"
           @click="setTab(tab)"
         >
-          {{ tab }}
+          <span class="tab-icon" aria-hidden="true">
+            <span v-if="tab === 'Explore'">🧭</span>
+            <span v-else-if="tab === 'Wishlist'">♡</span>
+            <span v-else-if="tab === 'Ratings'">⭐</span>
+          </span>
+          <span class="tab-label">
+            {{ tab }}
+          </span>
         </button>
       </div>
     </header>
@@ -559,7 +812,7 @@ function getRating(id) {
               </button>
             </div>
             <input
-              v-model="searchQuery"
+              v-model.trim="searchQuery"
               type="search"
               class="search-input"
               placeholder="Search titles..."
@@ -603,7 +856,7 @@ function getRating(id) {
                 {{ item.genres.join(', ') }}
               </p>
               <p class="card-meta subtle">
-                {{ item.year }} • {{ item.episodes }} episodes
+                {{ getMetaLine(item) }}
               </p>
 
               <div class="rating-row">
@@ -682,7 +935,7 @@ function getRating(id) {
                 {{ item.genres.join(', ') }}
               </p>
               <p class="card-meta subtle">
-                {{ item.year }} • {{ item.episodes }} episodes
+                {{ getMetaLine(item) }}
               </p>
             </div>
           </article>
@@ -723,7 +976,7 @@ function getRating(id) {
                 {{ item.genres.join(', ') }}
               </p>
               <p class="card-meta subtle">
-                {{ item.year }} • {{ item.episodes }} episodes
+                {{ getMetaLine(item) }}
               </p>
               <div class="rating-pill">
                 <span class="rating-pill-label">Your rating</span>
@@ -788,11 +1041,25 @@ function getRating(id) {
   background: transparent;
   color: #d1d5db;
   font-size: 14px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
 }
 
 .tab-button--active {
   background: #f9fafb;
   color: #111827;
+}
+
+.tab-icon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+}
+
+.tab-label {
+  display: inline-block;
 }
 
 .content {
