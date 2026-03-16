@@ -180,11 +180,20 @@ const baseItems = reactive([
 // Extra titles loaded dynamically from search (only shown while searching)
 const remoteItems = ref([])
 
+// Titles that should persist (e.g. wishlisted/rated remote results)
+const savedItems = ref([])
+
 // Store fetched poster URLs keyed by item id
 const posters = reactive({})
 
 const wishlist = reactive(new Set())
 const ratings = reactive({})
+
+const LS_KEYS = {
+  wishlist: 'myrankings:wishlist',
+  ratings: 'myrankings:ratings',
+  savedItems: 'myrankings:savedItems',
+}
 
 async function updateEpisodeCountFromOmdb(item, baseData) {
   if (!baseData) return
@@ -316,6 +325,11 @@ async function fetchRemoteTitleIfMissing(query) {
         )
         if (alreadyExists) continue
 
+        const alreadySaved = savedItems.value.some(
+          (item) => item.title.toLowerCase() === title.toLowerCase(),
+        )
+        if (alreadySaved) continue
+
         const year = result.Year
         const newItem = {
           id: nextId,
@@ -341,6 +355,37 @@ function getPosterUrl(item) {
 
 onMounted(() => {
   fetchAllPosters()
+
+  // Restore persisted state
+  try {
+    const rawWishlist = localStorage.getItem(LS_KEYS.wishlist)
+    const rawRatings = localStorage.getItem(LS_KEYS.ratings)
+    const rawSavedItems = localStorage.getItem(LS_KEYS.savedItems)
+
+    const wishlistIds = rawWishlist ? JSON.parse(rawWishlist) : []
+    if (Array.isArray(wishlistIds)) {
+      wishlist.clear()
+      for (const id of wishlistIds) wishlist.add(id)
+    }
+
+    const parsedRatings = rawRatings ? JSON.parse(rawRatings) : null
+    if (parsedRatings && typeof parsedRatings === 'object') {
+      for (const key of Object.keys(ratings)) delete ratings[key]
+      for (const [id, score] of Object.entries(parsedRatings)) {
+        ratings[id] = score
+      }
+    }
+
+    const parsedSaved = rawSavedItems ? JSON.parse(rawSavedItems) : []
+    if (Array.isArray(parsedSaved)) {
+      savedItems.value = parsedSaved
+      for (const item of savedItems.value) {
+        fetchPosterForItem(item)
+      }
+    }
+  } catch (e) {
+    console.error('Failed to restore from localStorage', e)
+  }
 })
 
 watch(
@@ -354,6 +399,43 @@ watch(
     }
     fetchRemoteTitleIfMissing(value)
   },
+)
+
+// Persist wishlist/ratings/savedItems
+watch(
+  () => Array.from(wishlist).slice().sort((a, b) => Number(a) - Number(b)),
+  (ids) => {
+    try {
+      localStorage.setItem(LS_KEYS.wishlist, JSON.stringify(ids))
+    } catch (e) {
+      console.error('Failed to persist wishlist', e)
+    }
+  },
+  { deep: false },
+)
+
+watch(
+  ratings,
+  (value) => {
+    try {
+      localStorage.setItem(LS_KEYS.ratings, JSON.stringify(value))
+    } catch (e) {
+      console.error('Failed to persist ratings', e)
+    }
+  },
+  { deep: true },
+)
+
+watch(
+  () => savedItems.value,
+  (value) => {
+    try {
+      localStorage.setItem(LS_KEYS.savedItems, JSON.stringify(value))
+    } catch (e) {
+      console.error('Failed to persist saved items', e)
+    }
+  },
+  { deep: true },
 )
 
 const filteredItems = computed(() => {
@@ -378,7 +460,7 @@ const filteredItems = computed(() => {
   )
 })
 
-const allItems = computed(() => [...baseItems, ...remoteItems.value])
+const allItems = computed(() => [...baseItems, ...savedItems.value, ...remoteItems.value])
 
 const wishlistItems = computed(() =>
   allItems.value.filter((item) => wishlist.has(item.id)),
@@ -400,11 +482,27 @@ function toggleWishlist(id) {
   if (wishlist.has(id)) {
     wishlist.delete(id)
   } else {
+    const item = allItems.value.find((i) => i.id === id)
+    if (item) {
+      const isBase = baseItems.some((b) => b.id === id)
+      const isSaved = savedItems.value.some((s) => s.id === id)
+      if (!isBase && !isSaved) {
+        savedItems.value.push({ ...item })
+      }
+    }
     wishlist.add(id)
   }
 }
 
 function setRating(id, score) {
+  const item = allItems.value.find((i) => i.id === id)
+  if (item) {
+    const isBase = baseItems.some((b) => b.id === id)
+    const isSaved = savedItems.value.some((s) => s.id === id)
+    if (!isBase && !isSaved) {
+      savedItems.value.push({ ...item })
+    }
+  }
   ratings[id] = score
 }
 
