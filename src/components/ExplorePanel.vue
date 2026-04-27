@@ -18,6 +18,7 @@ const emit = defineEmits([
   'toggle-wishlist',
   'set-rating',
   'clear-rating',
+  'poster-error',
 ])
 </script>
 
@@ -61,6 +62,7 @@ const emit = defineEmits([
         @toggle-wishlist="emit('toggle-wishlist', $event)"
         @set-rating="(id, score) => emit('set-rating', id, score)"
         @clear-rating="emit('clear-rating', $event)"
+        @poster-error="(item, url) => emit('poster-error', item, url)"
       />
     </div>
   </section>

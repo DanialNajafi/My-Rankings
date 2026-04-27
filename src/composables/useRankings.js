@@ -26,8 +26,28 @@ export function useRankings() {
   const remoteItems = ref([])
   const savedItems = ref([])
   const posters = reactive({})
+  const failedPosterUrls = reactive({})
+  const posterRefreshInFlight = reactive({})
   const wishlist = reactive(new Set())
   const ratings = reactive({})
+
+  function hasPosterUrlFailed(id, url) {
+    if (id == null || !url) return false
+    return Boolean(failedPosterUrls[id]?.[url])
+  }
+
+  function markPosterUrlFailed(id, url) {
+    if (id == null || !url) return
+    if (!failedPosterUrls[id]) failedPosterUrls[id] = {}
+    failedPosterUrls[id][url] = true
+  }
+
+  function setPosterUrlIfValid(id, url) {
+    if (id == null || !url) return false
+    if (hasPosterUrlFailed(id, url)) return false
+    posters[id] = url
+    return true
+  }
 
   function getNextId() {
     const all = [...baseItems, ...savedItems.value]
@@ -62,7 +82,7 @@ export function useRankings() {
         baseItems.push(withId)
 
         if (item.posterUrl) {
-          posters[id] = item.posterUrl
+          setPosterUrlIfValid(id, item.posterUrl)
         } else {
           fetchPosterForItem(withId)
         }
@@ -81,7 +101,7 @@ export function useRankings() {
       if (typeof meta.year === 'number') item.year = meta.year
       if (typeof meta.episodes === 'number') item.episodes = meta.episodes
       if (Array.isArray(meta.genres) && meta.genres.length > 0) item.genres = meta.genres
-      if (meta.coverUrl) posters[item.id] = meta.coverUrl
+      if (meta.coverUrl) setPosterUrlIfValid(item.id, meta.coverUrl)
       if (meta.anilistId) item.anilistId = meta.anilistId
       return
     }
@@ -97,7 +117,7 @@ export function useRankings() {
         }
 
         if (data.Poster && data.Poster !== 'N/A') {
-          posters[item.id] = data.Poster
+          setPosterUrlIfValid(item.id, data.Poster)
         }
 
         if (data.imdbID) item.imdbID = data.imdbID
@@ -172,7 +192,9 @@ export function useRankings() {
             }
             nextId += 1
             remoteItems.value.push(newItem)
-            if (media?.coverImage?.large) posters[newItem.id] = media.coverImage.large
+            if (media?.coverImage?.large) {
+              setPosterUrlIfValid(newItem.id, media.coverImage.large)
+            }
           }
         }
       } catch (e) {
@@ -219,7 +241,52 @@ export function useRankings() {
   }
 
   function getPosterUrl(item) {
-    return posters[item.id] ?? null
+    if (!item) return null
+    const posterUrl = posters[item.id] ?? null
+    if (!posterUrl) return null
+    return hasPosterUrlFailed(item.id, posterUrl) ? null : posterUrl
+  }
+
+  async function tryRefreshPosterFromAniList(item) {
+    const meta = await fetchAnimeMetaFromAniList(item.title)
+    if (!meta) return false
+    if (meta.coverUrl && setPosterUrlIfValid(item.id, meta.coverUrl)) return true
+    return false
+  }
+
+  async function tryRefreshPosterFromOmdb(item) {
+    if (!OMDB_API_KEY) return false
+    const data = await omdbFetchByItem(item, OMDB_API_KEY)
+    if (!data || data.Response !== 'True') return false
+    if (data.Poster && data.Poster !== 'N/A' && setPosterUrlIfValid(item.id, data.Poster)) return true
+    return false
+  }
+
+  async function handlePosterError(item, failedUrl) {
+    if (!item || item.id == null) return
+    if (failedUrl) {
+      markPosterUrlFailed(item.id, failedUrl)
+      if (posters[item.id] === failedUrl) delete posters[item.id]
+    }
+
+    if (posterRefreshInFlight[item.id]) return
+    posterRefreshInFlight[item.id] = true
+
+    try {
+      const isAnime = item?.source === 'anilist' || item?.kind === 'anime'
+      if (isAnime) {
+        if (await tryRefreshPosterFromAniList(item)) return
+        await tryRefreshPosterFromOmdb(item)
+        return
+      }
+
+      if (await tryRefreshPosterFromOmdb(item)) return
+      await tryRefreshPosterFromAniList(item)
+    } catch (e) {
+      console.error('Failed to refresh poster for', item?.title, e)
+    } finally {
+      posterRefreshInFlight[item.id] = false
+    }
   }
 
   onMounted(() => {
@@ -411,6 +478,7 @@ export function useRankings() {
     isWishlisted,
     getRating,
     getPosterUrl,
+    handlePosterError,
     getMetaLine,
   }
 }

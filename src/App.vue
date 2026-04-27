@@ -22,6 +22,7 @@ const {
   isWishlisted,
   getRating,
   getPosterUrl,
+  handlePosterError,
   getMetaLine,
 } = useRankings()
 </script>
@@ -45,6 +46,7 @@ const {
         @toggle-wishlist="toggleWishlist"
         @set-rating="setRating"
         @clear-rating="clearRating"
+        @poster-error="handlePosterError"
       />
 
       <WishlistPanel
@@ -53,6 +55,7 @@ const {
         :get-poster-url="getPosterUrl"
         :get-meta-line="getMetaLine"
         @toggle-wishlist="toggleWishlist"
+        @poster-error="handlePosterError"
       />
 
       <RatingsPanel
@@ -62,6 +65,7 @@ const {
         :get-meta-line="getMetaLine"
         :get-rating="getRating"
         @clear-rating="clearRating"
+        @poster-error="handlePosterError"
       />
     </main>
   </div>

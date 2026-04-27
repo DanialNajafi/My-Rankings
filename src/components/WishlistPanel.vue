@@ -7,7 +7,7 @@ defineProps({
   getMetaLine: { type: Function, required: true },
 })
 
-const emit = defineEmits(['toggle-wishlist'])
+const emit = defineEmits(['toggle-wishlist', 'poster-error'])
 </script>
 
 <template>
@@ -31,6 +31,7 @@ const emit = defineEmits(['toggle-wishlist'])
         :is-wishlisted="true"
         :rating="null"
         @toggle-wishlist="emit('toggle-wishlist', $event)"
+        @poster-error="(item, url) => emit('poster-error', item, url)"
       />
     </div>
   </section>

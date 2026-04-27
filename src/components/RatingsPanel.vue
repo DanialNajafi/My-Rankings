@@ -8,7 +8,7 @@ defineProps({
   getRating: { type: Function, required: true },
 })
 
-const emit = defineEmits(['clear-rating'])
+const emit = defineEmits(['clear-rating', 'poster-error'])
 </script>
 
 <template>
@@ -31,6 +31,7 @@ const emit = defineEmits(['clear-rating'])
         :meta-line="getMetaLine(item)"
         :rating="getRating(item.id)"
         @clear-rating="emit('clear-rating', $event)"
+        @poster-error="(item, url) => emit('poster-error', item, url)"
       />
     </div>
   </section>

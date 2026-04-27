@@ -12,7 +12,7 @@ defineProps({
   rating: { type: [Number, null], default: null },
 })
 
-const emit = defineEmits(['toggle-wishlist', 'set-rating', 'clear-rating'])
+const emit = defineEmits(['toggle-wishlist', 'set-rating', 'clear-rating', 'poster-error'])
 </script>
 
 <template>
@@ -23,6 +23,7 @@ const emit = defineEmits(['toggle-wishlist', 'set-rating', 'clear-rating'])
         class="card-media-img"
         :src="posterUrl"
         :alt="item.title"
+        @error="emit('poster-error', item, posterUrl)"
       />
       <div v-else class="card-media-placeholder">
         <span class="card-media-icon">🖼️</span>
