@@ -124,6 +124,14 @@ export function useRankings() {
         if (data.Type) item.omdbType = data.Type
         if (data.Type) item.kind = data.Type
 
+        if (data.Genre && data.Genre !== 'N/A' && (!item.genres || item.genres.length === 0)) {
+          const matched = data.Genre.split(',')
+            .map((g) => g.trim())
+            .map((g) => GENRES.find((appGenre) => appGenre.toLowerCase() === g.toLowerCase()))
+            .filter(Boolean)
+          if (matched.length > 0) item.genres = matched
+        }
+
         if (data.Type === 'series' && data.totalSeasons && data.imdbID) {
           const tvmazeCount = await fetchSeriesEpisodeCountFromTvmaze(item)
           if (typeof tvmazeCount === 'number' && tvmazeCount > 0) {
